@@ -2,7 +2,7 @@ from sympy import *
 from time import time
 from mpmath import radians
 import tf
-
+from math import pi as PI
 '''
 Format of test case is [ [[EE position],[EE orientation as quaternions]],[WC location],[joint angles]]
 You can generate additional test cases by setting up your kuka project and running `$ roslaunch kuka_arm forward_kinematics.launch`
@@ -62,14 +62,110 @@ def test_code(test_case):
     ########################################################################################
     ## 
 
-    ## Insert IK code here!
+        # Create symbols
+    q1, q2, q3, q4, q5, q6, q7 = symbols('q1:8')
+    d1, d2, d3, d4, d5, d6, d7 = symbols('d1:8')
+    a0, a1, a2, a3, a4, a5, a6 = symbols('a0:7')
+    alpha0, alpha1, alpha2, alpha3, alpha4, alpha5, alpha6 = symbols('alpha0:7')
+    #
+    # Create Modified DH parameters
+    #
+    rtd = 180/PI
+    dtr = PI/180
+
+    a12=0.35
+    a23=1.25
+    a34=-0.054
+    d12=0.75
+    d45=1.5
+    d67=0.303
+
+    s = {alpha0:       0, a0:   0, d1: d12, 
+         alpha1: -90*dtr, a1: a12, d2: 0,  
+         alpha2:       0, a2: a23, d3: 0,
+         alpha3: -90*dtr, a3: a34, d4: d45,
+         alpha4:  90*dtr, a4:   0, d5: 0,
+         alpha5: -90*dtr, a5:   0, d6: 0,
+         alpha6:       0, a6:   0, d7: d67}
+
+    # Create individual transformation matrices
+    T0_1  = TF_Matrix(alpha0, a0, d1, q1).subs(s)
+    T1_2  = TF_Matrix(alpha1, a1, d2, q2).subs(s)
+    T2_3  = TF_Matrix(alpha2, a2, d3, q3).subs(s)
+    T3_4  = TF_Matrix(alpha3, a3, d4, q4).subs(s)
+    T4_5  = TF_Matrix(alpha4, a4, d5, q5).subs(s)
+    T5_6  = TF_Matrix(alpha5, a5, d6, q6).subs(s)
+    T6_EE = TF_Matrix(alpha6, a6, d7, q7).subs(s)
+
+    T0_EE = T0_1 * T1_2 * T2_3 * T3_4 * T4_5 * T5_6 * T6_EE
+
+    # Extract rotation matrices from the transformation matrices
+	
+    r, p, y = symbols('r p y')
+
+    ROT_x = rot_x(r)
+    ROT_y = rot_x(p)
+    ROT_z = rot_x(y)
+
+    ROT_EE = ROT_z * ROT_y * ROT_x
+
+    R_corr=rot_z(180*dtr)*rot_y(-90*dtr)
+	
+    #Transform from base link to end effector after correction matrix
+    T_corr = R_corr.row_join(Matrix([[0], [0], [0]]))
+    T_corr = T_corr.col_join(Matrix([[0, 0, 0, 1]])) 
+    T_base_gripper = T0_EE*T_corr
+
+
+    # Compensate for rotation discrepancy between DH parameters and Gazebo
+    ROT_corr = ROT_z.subs(y, radians(180)) * ROT_y.subs(p, radians(-90))
+
+    ROT_EE = ROT_EE * ROT_corr		
+    px = req.poses[x].position.x
+    py = req.poses[x].position.y
+    pz = req.poses[x].position.z
+
+    (roll, pitch, yaw) = tf.transformations.euler_from_quaternion(
+                    [req.poses[x].orientation.x, req.poses[x].orientation.y,
+                    req.poses[x].orientation.z, req.poses[x].orientation.w])
+
+    # Compensate for rotation discrepancy between DH parameters and Gazebo
+    #Rotational matrix using yaw,pitch & roll of the gripper
+	    
+    Rrpy = ROT_EE.subs({r : roll, y : yaw, p : pitch}) #rot_z(yaw)*rot_y(pitch)*rot_x(roll)*R_corr 
     
-    theta1 = 0
-    theta2 = 0
-    theta3 = 0
-    theta4 = 0
-    theta5 = 0
-    theta6 = 0
+    #Calculate the position of wrist center
+
+    l_gripper=0
+    WC_x=px-((d67+l_gripper)*Rrpy[0,2])
+    WC_y=py-((d67+l_gripper)*Rrpy[1,2])
+    WC_z=pz-((d67+l_gripper)*Rrpy[2,2])
+
+    # Position inverse kinematics
+
+    theta1=atan2(WC_y,WC_x)
+
+    beta1=atan2(WC_z-d12,(sqrt((WC_x**2)+(WC_y**2))-a12))
+    d25=sqrt(((WC_z-d12)**2)+((sqrt((WC_x**2)+(WC_y**2))-a12)**2))
+    d35=sqrt((d45**2)+(a34**2))
+    beta2=acos(((d25**2)+(a23**2)-(d35**2))/(2*d25*a23))    
+    theta2=(PI/2)-beta1-beta2
+
+    beta3=acos(((a23**2)+(d35**2)-(d25**2))/(2*d35*a23))    
+    beta4=atan2(a34,d45)	    
+    theta3=(PI/2)-beta3-beta4
+    
+    # Spherical Inverse Kinematics
+
+    T0_3=T0_1 * T1_2 * T2_3 
+    T0_3=(T0_3.evalf(subs={q1: theta1, q2: theta2, q3: theta3}))
+
+    R0_3=T0_3[0:3,0:3]
+    R3_6=R0_3.T * Rrpy
+
+    theta4 = atan2(R3_6[2,2], -R3_6[0,2])
+    theta5 = atan2(sqrt(R3_6[0,2]**2 + R3_6[2,2]**2), R3_6[1,2])
+    theta6 = atan2(-R3_6[1,1], R3_6[1,0])
 
     ## 
     ########################################################################################
